@@ -1,0 +1,1383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<title>three.js webgl - interactive cubes</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+<style>
+body {
+	background-color: #f0f0f0;
+	color: #444;
+}
+a {
+	color: #08f;
+}
+.label {
+	color: "black";
+	font-family: sans-serif;
+	font-size: 10px;
+	padding: 2px;
+	background: rgba( 0, 0, 0, .6 );
+}
+
+.group_label {
+	color: "lightgrey";
+	font-family: sans-serif;
+	font-style: bold;
+	font-size: 10px;
+	padding: 0px;
+	margin: 0px;
+	opacity: 1;
+	background: rgba( 0, 0, 0, 1);
+}
+</style>
+</head>
+<body>
+
+<div id="info">
+<a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> webgl - interactive cubes
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/21.0.0/tween.umd.js"></script>
+<script type="importmap">
+{
+	"imports": {
+	"three": "https://unpkg.com/three@0.159.0/build/three.module.js",
+	"three/addons/": "https://unpkg.com/three@0.159.0/examples/jsm/"
+	}
+}
+</script>
+
+<script type="module">
+
+import * as THREE from 'three';
+import Stats from 'three/addons/libs/stats.module.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+let stats, camera, scene, raycaster, renderer, INTERSECTED, controls, labelRenderer;
+let theta = 0;
+const pointer = new THREE.Vector2();
+const radius = 15;
+let nn_master
+const CLICKABLE_LAYER = 1
+const TWEEN_MS = 600
+const TWEEN_EASE = TWEEN.Easing.Linear.None
+
+// add_text(input_act, input_act_m)
+let initial_collapsed
+
+let group_info = []
+
+// const small_sphere_geometry = new THREE.SphereGeometry(1, 6, 6);
+const small_sphere_geometry = new THREE.CircleGeometry(1, 6);
+
+// const sphere_geometry = new THREE.SphereGeometry(1, 12, 12);
+const sphere_geometry = new THREE.CircleGeometry(1, 12);
+
+
+const box_geometry = new THREE.BoxGeometry();
+
+function scale_box(box, shape) {
+	let SCALAR = 400
+	box.scale.x *= (shape[0]/SCALAR)
+	box.scale.y *= (shape[1]/SCALAR)
+	box.scale.z *= (shape[2]/SCALAR)
+}
+function scale_sphere(sphere, n_ops) {
+	let SCALAR = .08
+	if (n_ops>1) {
+		SCALAR *= 2
+	}
+	sphere.scale.x *= SCALAR
+	sphere.scale.y *= SCALAR
+	sphere.scale.z *= SCALAR
+}
+
+function intx(name, list) {
+	return list.filter(item => name.includes(item)).length > 0
+}
+//
+
+function get_group_label(op) {
+	const div = document.createElement( 'div' );
+	div.className = 'group_label';
+	let s = op.name.split("-")
+	let text = s[0].toUpperCase() 
+	if (s.length==2) text += "-" + s[1].slice(s[1].length-4, s[1].length) + "-" + op.row_counter // 
+	div.innerHTML = text
+	div.style.backgroundColor = 'transparent';
+
+	const label = new CSS2DObject( div );
+	return label
+}
+
+function nice_name(op) {
+	return op.name.slice(0, 10) + "-" + op.node_id.slice(op.node_id.length-4, op.node_id.length)
+}
+
+function get_text(op) {
+	const div = document.createElement( 'div' );
+	div.className = 'label';
+	let text = nice_name(op)
+	text += ("<br>"+op.node_id.slice(op.node_id.length-10, op.node_id.length))
+	text += ("<br>in "+op.input_shapes)
+	text += ("<br>out "+op.output_shapes)
+	text += ("<br>row "+op.row_counter)
+	// text += ("<br>end "+op.dist_from_end_global)
+	// text += ("<br>start "+op.dist_from_start_global)
+	text += ("<br>respath "+ op.respath_dist)
+	text += ("<br>order "+op.draw_order)
+	if (op.is_output) text += ("<br>exec "+op.execution_counter)
+	// if (op.is_input) text += ("<br>n downstream ops "+op.n_downstream_ops)
+	if (op.is_input) text += ("<br>io priority "+op.input_priority)
+
+	// text += "<br> " + op.node_id
+	// if (op.extras.length > 0) {
+	// 	op.extras.forEach(e => text += ("<br>"+e))
+	// }
+	div.innerHTML = text
+	div.style.backgroundColor = 'transparent';
+
+	const label = new CSS2DObject( div );
+	label.position.set( 0, 0, 0 );
+	// label.center.set( .5, -.5 ); // centers over node
+	label.center.set( .5, 0 ); // above node, centered horizontally
+	return label
+}
+
+function get_connecting_curve_conditioning(pt1, pt2, color) {
+	let x_diff = pt2.x - pt1.x
+	let pts = [
+			new THREE.Vector3(pt1.x, pt1.y, pt1.z),
+			new THREE.Vector3(pt1.x + x_diff*.1,  pt1.y, pt1.z),
+			new THREE.Vector3(pt2.x, pt2.y, pt2.z+2),
+			new THREE.Vector3(pt2.x, pt2.y, pt2.z),
+		]
+	// console.log("pts", pts)
+	const curve = new THREE.CatmullRomCurve3(pts);
+	curve.curveType = 'chordal';
+	const points = curve.getPoints( 20 );
+	const geometry = new THREE.BufferGeometry().setFromPoints( points );
+	const material = new THREE.LineBasicMaterial( { color: color} );
+	const curveObject = new THREE.Line( geometry, material );
+	return curveObject
+} // consolidate w below TODO
+
+
+function get_connecting_curve(pt1, pt2, color) {
+	let x_diff = pt2.x - pt1.x
+	let z_diff = pt2.z - pt1.z
+	let zd = .02
+	let xd = .05
+	let pts = [
+			new THREE.Vector3(pt1.x, pt1.y, pt1.z),
+			new THREE.Vector3(pt1.x + x_diff*xd,  pt1.y, pt1.z + z_diff*zd),
+			new THREE.Vector3(pt2.x - x_diff*xd, pt2.y, pt2.z - z_diff*zd),
+			new THREE.Vector3(pt2.x, pt2.y, pt2.z),
+		]
+	// console.log("pts", pts)
+	const curve = new THREE.CatmullRomCurve3(pts);
+	curve.curveType = 'chordal';
+	const points = curve.getPoints( 16 );
+	const geometry = new THREE.BufferGeometry().setFromPoints( points );
+	const material = new THREE.LineBasicMaterial( { color: color } );
+	const curveObject = new THREE.Line( geometry, material );
+	return curveObject
+}
+
+function get_connecting_curve_flat(pt1, pt2, color) {
+	let pts = [
+			new THREE.Vector3(pt1.x, pt1.y, pt1.z),
+			new THREE.Vector3(pt2.x, pt2.y, pt2.z),
+		]
+	const line_geometry = new THREE.BufferGeometry().setFromPoints(pts);
+	const material = new THREE.LineBasicMaterial( { color: color } );
+	const curveObject = new THREE.Line(line_geometry, material);
+	return curveObject
+}
+
+function get_sphere_color(n) {
+	if (n.is_conditioning_upstream) {
+		return new THREE.Color("aqua")
+	} else if (n.is_conditioning) {
+		return new THREE.Color("blue")
+	} else if (n.is_global_input) {
+		return new THREE.Color("orange")
+	} else if (n.is_input && !n.has_been_used) {
+		return new THREE.Color("black")
+	} else if (n.is_output_global) {
+		return new THREE.Color("purple")
+	} else if (n.is_input) {
+		return new THREE.Color("yellow")
+	} else if (n.is_output) {
+		return new THREE.Color("red")
+	} else if (n.node_type=="mod_out") {
+		return new THREE.Color("pink")
+	} else if (n.node_type=="mod_in") {
+		return new THREE.Color("gold")
+	} else {
+		return new THREE.Color("lightblue")
+	}
+}
+function get_sphere_group(n){
+
+	let color = get_sphere_color(n)
+
+	let sphere = new THREE.Mesh( sphere_geometry, new THREE.MeshBasicMaterial( { color: color } ) )
+	sphere.rotation.x = -Math.PI / 2; // Rotate 90 degrees to make it face upward
+	sphere.position.y += .1 // shift towards camera so doesn't overlap w edges
+
+	scale_sphere(sphere, n.n_ops)
+	sphere.layers.set(CLICKABLE_LAYER)
+	let group = new THREE.Group();
+	group.add(sphere)
+	let text = get_text(n)
+	group.add(text)
+	group["text_dom_element"] = text
+
+	// Create a larger sphere for click events
+    let largerSphere = new THREE.Mesh(sphere_geometry,
+			new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.0 }));
+	largerSphere.rotation.x = -Math.PI / 2; // Rotate 90 degrees to make it face upward
+	largerSphere.position.y += .1
+	
+	let s = 3
+	largerSphere.scale.x = sphere.scale.x * s
+	largerSphere.scale.y = sphere.scale.y * s
+	largerSphere.scale.z = sphere.scale.z * s
+	largerSphere.layers.set(CLICKABLE_LAYER);
+	largerSphere.smaller_sphere = sphere
+    group.add(largerSphere);
+
+	group.children.forEach(c => c.actual_node = n) // required for onHover, click events
+
+	return group
+}
+
+function get_z_plane(op) {
+	// return interp(op.n_ops, [2,20,800], [-.1, -.3, -.9]) // 3d
+	return interp(op.depth, [0,100], [-10, -1])
+}
+
+// 3d
+// function get_plane_color(n_ops) {
+// 	// let r = interp(n_ops, [2, 12, 50], [.5, .75, .99])
+// 	let r = interp(n_ops, [2, 20, 400], [.2, .5, .99])
+// 	const g = 1
+// 	// let b = interp(n_ops, [2, 12, 50], [.99, .75, .5])
+// 	let b = interp(n_ops, [2, 20, 400], [.99, .5, .2])
+// 	const color = new THREE.Color(r, g, b)
+// 	// let color = new THREE.Color(Math.random() *.1* 0xff0000)
+// 	return color
+// }
+
+let max_depth
+
+
+function get_plane_color(op, _max_depth) {
+	let d = op.depth
+	let d_range = [0, _max_depth]
+	let c1 = [248, 249, 250]
+	// let c1 = [233, 236, 239]
+	// let c2 = [173, 181, 189]
+	let c2 = [119, 129, 137]
+	// let c2 = [108, 117, 125]
+
+	c1 = c1.map(d => d/255)
+	c2 = c2.map(d => d/255)
+	let r = interp(d, d_range, [c1[0], c2[0]])
+	let g = interp(d, d_range, [c1[1], c2[1]])
+	let b = interp(d, d_range, [c1[2], c2[2]])
+	const color = new THREE.Color(r, g, b)
+	return color
+}
+
+// function get_plane_color(op) {
+// 	let c1 = [206, 212, 218]
+// 	let c2 = [222, 226, 230]
+// 	c1 = c1.map(d => d/255)
+// 	c2 = c2.map(d => d/255)
+// 	const color = new THREE.Color(...((op.depth % 2) == 0 ? c1 : c2))
+// 	return color
+// }
+
+function interp(xPoint, breakpoints, values) { // chatgpt
+	// Find the first breakpoint larger than the xPoint
+	const upperIndex = breakpoints.findIndex(breakpoint => breakpoint > xPoint);
+	if (upperIndex === -1) {
+		return values[values.length - 1]; // Return the last value if xPoint is beyond the range
+	}
+	if (upperIndex === 0) {
+		return values[0]; // Return the first value if xPoint is before the range
+	}
+
+	// Perform linear interpolation
+	const lowerIndex = upperIndex - 1;
+	const lowerBreakpoint = breakpoints[lowerIndex];
+	const upperBreakpoint = breakpoints[upperIndex];
+	const lowerValue = values[lowerIndex];
+	const upperValue = values[upperIndex];
+
+	const t = (xPoint - lowerBreakpoint) / (upperBreakpoint - lowerBreakpoint);
+	return lowerValue + t * (upperValue - lowerValue);
+}
+
+let group_names
+
+/////////////////////////////////////
+// init gui
+
+fetch("model_specs/model_specs_overview.json")
+	.then(response => response.json())
+	.then(model_specs_overview => init_gui(model_specs_overview))
+
+const params = {
+	model: 'xxx',
+	collapse_to_depth: 3,
+};
+const depth_collapse_values = {
+	1:1,
+	2:2,
+	3:3,
+	4:4,
+	5:5,
+	12:12,
+}
+function init_gui(model_specs_overview) {
+	// default model
+	let model_options = Object.keys(model_specs_overview)
+	let default_nn = model_options[0]
+	params.model = default_nn
+	load_nn(model_specs_overview[default_nn])
+
+	// gui
+	const gui = new GUI();
+	gui.add( params, 'model', model_specs_overview ).onChange( load_nn );
+	gui.add( params, 'collapse_to_depth', depth_collapse_values ).onChange( collapse_to_depth );
+	gui.open()
+}
+/////////////////////////////////////
+
+function remove_dom_el_bv_class_name (class_name) { // chatgpt
+	var elements = document.getElementsByClassName(class_name);
+	// Use a while loop to remove elements because getElementsByClassName returns a live HTMLCollection
+	while (elements.length > 0) {
+		elements[0].parentNode.removeChild(elements[0]);
+	}
+
+}
+function clear_scene() {
+	scene.traverse(function(object) { // chatgpt
+		if (object.isMesh) {
+			if (object.geometry) {
+				object.geometry.dispose();
+			}
+
+			if (object.material) {
+				if (object.material.isMaterial) {
+					cleanMaterial(object.material);
+				} else {
+					// An array of materials
+					for (const material of object.material) cleanMaterial(material);
+				}
+			}
+		}
+	});
+
+	function cleanMaterial(material) {
+		material.dispose();
+
+		// Dispose textures
+		for (const key of Object.keys(material)) {
+			const value = material[key];
+			if (value && typeof value === 'object' && 'minFilter' in value) {
+				value.dispose();
+			}
+		}
+	}
+	while(scene.children.length > 0){
+		scene.remove(scene.children[0]);
+	}
+
+	scene.clear()
+	let names = ["group_label", "label"]
+	names.forEach(n => remove_dom_el_bv_class_name(n))
+}
+
+function load_nn (nn) {
+	console.log("loading nn", nn)
+	clear_scene()
+	// TODO consolidate. Prob use emissive for objects, no need for directional light
+	const light = new THREE.DirectionalLight( 0xffffff, 3 );
+	light.position.set( 1, 1, 1 ).normalize();
+	scene.add( light );
+
+	fetch(nn)
+		.then(response => response.json())
+		.then(json => init_nn(json))
+}
+
+function _collapse_to_depth(level) {
+	let ops_to_collapse = []
+	let ops_to_expand = []
+	function gather_ops_for_collapse_and_expansion(op) {
+		if (op.depth < level) {
+			if (op.children.length>0){
+				ops_to_expand.push(op)
+				op.children.forEach(c => gather_ops_for_collapse_and_expansion(c))
+			}
+		} else if (op.depth >= level) {
+			ops_to_collapse.push(op)
+			op.children.forEach(c => gather_ops_for_collapse_and_expansion(c))
+		}
+	}
+	gather_ops_for_collapse_and_expansion(window.nn)
+
+	ops_to_collapse.forEach(o => {
+		if (o.children.length>0){
+			mark_as_collapsed(o, true, false)
+			remove_all_meshes(o, {x:o.x, y:0, z:o.y})
+		}
+	})
+	ops_to_expand.forEach(o => {
+		if (o.children.length>0){
+			mark_as_collapsed(o, false, false)
+		}
+	})
+}
+
+function collapse_to_depth(level) {
+	_collapse_to_depth(level)
+	recompute_layout()
+	draw_nn()
+}
+
+
+init_scene()
+
+function init_scene() {
+	// camera = new THREE.PerspectiveCamera( 70, window.innerWidth / window.innerHeight, 0.1, 1000 );
+	// camera = new THREE.OrthographicCamera( 70, window.innerWidth / window.innerHeight, 0.1, 1000 );
+
+	camera = new THREE.OrthographicCamera(
+		window.innerWidth / -2, window.innerWidth / 2,
+		window.innerHeight / 2, window.innerHeight / -2,
+		0.1, 1000
+	);
+
+
+	// Enable both default layer and clickable layer on the camera
+	camera.layers.enable(0); // Default layer
+	camera.layers.enable(CLICKABLE_LAYER);
+	camera.position.set(0, 10, 0 );
+	camera.zoom = 28 // for 2d
+	window.camera_debug = camera
+
+	scene = new THREE.Scene();
+	scene.background = new THREE.Color(200,200,200);
+
+	const light = new THREE.DirectionalLight( 0xffffff, 3 );
+	light.position.set( 1, 1, 1 ).normalize();
+	scene.add( light );
+
+	window.scene = scene
+	////////////////////////////////
+	raycaster = new THREE.Raycaster();
+
+	renderer = new THREE.WebGLRenderer( { antialias: true } );
+	renderer.setPixelRatio( window.devicePixelRatio );
+	renderer.setSize( window.innerWidth, window.innerHeight );
+	document.body.appendChild( renderer.domElement );
+
+	stats = new Stats();
+	document.body.appendChild( stats.dom );
+
+	// document.addEventListener( 'mousemove', onPointerMove );
+	window.addEventListener( 'resize', onWindowResize );
+	// document.addEventListener( 'pointerdown', onPointerDown );
+	// document.addEventListener( 'click', onPointerDown );
+	document.addEventListener( 'dblclick', onPointerDown );
+
+	window.addEventListener('mousemove', onMouseMove, false);
+
+	// Label renderer
+	labelRenderer = new CSS2DRenderer();
+	labelRenderer.setSize( window.innerWidth, window.innerHeight );
+	labelRenderer.domElement.style.position = 'absolute';
+	labelRenderer.domElement.style.top = '0px';
+	document.body.appendChild( labelRenderer.domElement );
+
+	// controls
+	controls = new OrbitControls( camera, labelRenderer.domElement ); // note this is added to labelrenderer dom, otherwise can't use it. If no labelrendered, use renderer dom
+	controls.listenToKeyEvents( window ); // optional
+	
+	// for 3d
+	// controls.minDistance = 1;
+	// controls.maxDistance = 500;
+	// controls.maxPolarAngle = Math.PI / 2 
+	// controls.screenSpacePanning = false;
+
+	// for 2d
+	controls.enableRotate = false; // Disable rotation
+	controls.screenSpacePanning = true; // Allow panning in screen space
+	// controls.minZoom = 0.5; // Set minimum zoom level
+	// controls.maxZoom = 2; // Set maximum zoom level
+
+
+	animate();
+}
+
+function init_nn(nn) {
+
+	//////////////////////////////////////////// hacks for debugging
+	// nn = nn.children[1].children[4].children[1] // fastvit_s12 just one block, for debugging
+	// nn = nn.children[1].children[42].children[5] // hrnet
+	// nn = nn.children[1].children.filter(c => c.name.includes("ParallelBlock"))[2] // coat_mini
+	// nn = nn.children[1].children.filter(c => c.name.includes("CellStem"))[0] // nasnet large
+	// nn = nn.children[3].children.filter(c => c.name.includes("CrossAttnUp"))[0] // stable diff
+	// console.log(nn.children[3].children.map(n => n.name))
+	// nn = nn.children[1].children[1] // gcvit
+	function copy_dims(op) {
+		op.x_relative_original = op.x_relative
+		op.y_relative_original = op.y_relative
+		op.children.forEach(c => copy_dims(c))
+	}
+	copy_dims(nn)
+
+	window.nn = nn
+	console.log(nn)
+
+	////////////////////////////////////////////////////// endhack
+
+	window.nn = nn
+
+	// Get default depth
+	console.time("calc default depth")
+	let depth_counter = new Array(100).fill(0)
+	function count_n_nodes_at_depth_levels(op) {
+		depth_counter[op.depth] += op.children.length
+		op.children.forEach(c => count_n_nodes_at_depth_levels(c))
+	}
+	count_n_nodes_at_depth_levels(nn)
+
+	let default_depth
+	let done = false
+	let i = 0
+	let max_default_nodes = 2000
+	while (!done) {
+		let n_nodes = depth_counter[i]
+		if ((n_nodes > max_default_nodes) || (i>=depth_counter.length-1)) {
+			default_depth = i
+			done = true
+		}
+		i += 1
+	}
+
+	console.log("default depth ", default_depth, "depth counter", depth_counter.slice(0,10))
+	// init at collapsed depth
+	_collapse_to_depth(default_depth)
+	console.timeEnd("calc default depth")
+	
+	recompute_layout()
+	draw_nn()
+}
+
+function get_plane_specs(op){
+
+	// let w = op.w
+	let w = op.plane_info.max_x - op.plane_info.min_x
+	let h = op.plane_info.max_y - op.plane_info.min_y
+	let target_y = get_z_plane(op) // based on depth
+	let target_x = op.plane_info.min_x + w/2
+	let target_z = op.plane_info.min_y + h/2
+
+	// h = Math.max(h, .4)
+	// w = Math.max(w, .4)
+	// let width_pad = Math.min(w *.1, 1)
+	// let height_pad = Math.min(h *.1, 1)
+	// w += width_pad
+	// h += height_pad
+
+	const target_pos = { x: target_x, y: target_y, z: target_z };
+
+	return [h,w,target_pos]
+}
+
+function get_downstream_nodes(base_op, ops) {
+	return ops.filter(o => intx(base_op.outbound_edges, o.inbound_edges))
+}
+function get_upstream_nodes(base_op, ops) {
+	return ops.filter(o => intx(base_op.inbound_edges, o.outbound_edges))
+}
+function trace_all_nodes(base_op, ops, trace_fn) {
+	function _trace(n) {
+		n.traced = true
+		let downstream_nodes = trace_fn(n, ops)
+		downstream_nodes.forEach(dn => {
+			if (!dn.traced) {
+				dn.traced = true
+				_trace(dn)
+			}
+		})
+	}
+	_trace(base_op)
+}
+function clear_trace(ops) {
+	ops.forEach(n => n.traced = false)
+}
+
+function reset_dims(op) {
+	op.x_relative = op.x_relative_original
+	op.y_relative = op.y_relative_original
+	op.history_js = []
+	op.children.forEach(c => reset_dims(c))
+}
+
+function recompute_layout() {
+	console.time("compute layout")
+
+	let nn = window.nn
+
+	reset_dims(nn)
+
+	// Updating relative xy coords bc of expansions
+	// just consider two levels at a time: an op and its children ops
+	// the children ops x_relative and y_relative are defined in terms of their parent op's
+	// frame of reference, but their h and w dims are actual values
+
+	function update_op_h_w(op) {
+
+		if (op.collapsed || op.children.length==0) {
+			op.h = 0; op.w = 0
+			return
+		}
+
+		op.children.forEach(c => update_op_h_w(c))
+		// now each child has h w as a result of the expansion and arrangement of its children. 
+		// Imagine all the boxes expanded, but not yet shifted around, so there is overlap. We now 
+		// have to shift the boxes around to eliminate overlap. 
+		// Relative coords haven't been updated based on the h w and expansions of the peer subops. 
+		// That's what we're doing below.
+		
+		// relative X 
+		let input_ops = op.children.filter(o => o.is_input); input_ops.sort((a,b)=>a.input_priority - b.input_priority)
+		op.children.forEach(o => o.x_nudge_traversed = false)
+		function nudge_forward_dns(op_whose_dns_to_nudge) {
+			op_whose_dns_to_nudge.x_nudge_traversed = true
+
+			let dns = get_downstream_nodes(op_whose_dns_to_nudge, op.children)
+			let x_threshold = op_whose_dns_to_nudge.x_relative + op_whose_dns_to_nudge.w
+			dns.forEach(dn => {
+				if (dn.x_relative <= x_threshold) {
+					dn.x_relative = x_threshold + 1
+					dn.history_js.push("JS x nudged forward by "+nice_name(op_whose_dns_to_nudge)+" "+x_threshold+" "+dn.x_relative)
+					nudge_forward_dns(dn)
+				} else if (!dn.x_nudge_traversed) { // NOTE densenet was giving bug here, taking forever, not recursed but so many retreading. This prevents from retreading ground unless necessary
+					nudge_forward_dns(dn)
+				}
+			})
+		}
+		input_ops.forEach(o => nudge_forward_dns(o))
+		
+		// Moving all output nodes to the right edge of expanded box
+		// but only if they're not a module, ie if they're one of the single output ops we created ourselves
+		let max_x = Math.max(...op.children.map(o => o.x_relative))
+		let output_nodes = op.children.filter(o => o.is_output)
+		output_nodes = output_nodes.filter(o => o.node_type=="output") // ie not modules. ie the nodes we created manually.
+		output_nodes.forEach(o => o.x_relative = max_x)
+
+		// mod in to stay one behind mod 
+		op.children.filter(o=>o.node_type=="mod_in").forEach(o => {
+			let dn = get_downstream_nodes(o, op.children) // must be exactly one
+			o.x_relative = dn[0].x_relative - 1
+			o.history_js.push("moving mod_in to stay one less than dn")
+		})
+
+		//////
+		// Keep extension / branch nodes one behind their target downstream node, as that is their purpose
+		function get_node(nid, ns) {
+			return ns.filter(n => n.node_id==nid)[0]
+		}
+		op.children.filter(o=>["extension", "elbow"].includes(o.node_type)).forEach(branch_node => {
+			let branch_dns = branch_node.dn_ids.map(nid => get_node(nid, op.children))
+			let min_x = Math.min(...branch_dns.map(o => o.x_relative))
+			branch_node.x_relative = min_x - 1
+			branch_node.history_js.push("moving extension to stay one less than dn")
+		})
+
+
+		////////////////////////////////////////////////
+		// Relative y
+
+		// important that these always go top to bottom
+
+		op.children.sort((a,b)=>{
+			return a.draw_order - b.draw_order
+		})
+		let occupancy = new Array(3000).fill(-1)
+		let occupancy_ids = new Array(3000).fill("none") // for debugging only
+
+		op.children.forEach((c, ix) => {
+			// the child c will already be shifted into place. We are shifting the other ops in response to
+			// this child's box. This child will not be positioned here, the others will be shifted bc of 
+			// this child
+					
+			///////////////////////////////////
+			// update occupancy w child box
+			let c_top = c.y_relative + c.h
+			for (let i=c.x_relative; i<=c.x_relative+c.w; i++) {
+				if (c_top > occupancy[i]) {
+					occupancy[i] = Math.max(occupancy[i], c_top)
+					occupancy_ids[i] = "child box " + nice_name(c)
+				}
+			}
+
+			// if (c.collapsed) return
+
+
+			////////////////////////////////////
+			// update occupancy w connections to/from other ops
+
+			// expanded input ops of the current child, ie the box we're expanding
+			let c_io_ops
+			if (c.children.length==0 || c.collapsed) { // if c itself is node, ie not expanded, use itself as io
+				c.x_relative_grandparent = c.x_relative
+				c.y_relative_grandparent = c.y_relative
+				c_io_ops = [c]
+			} else { // child c is expanded, bring its io nodes up to its frame of reference
+				c_io_ops = c.children.filter(cc => cc.is_input || cc.is_output)
+				c_io_ops.forEach(cc => {  
+					// c_input in the frame of reference of grandparent op, rather than parent c
+					// ie now the children of c are also in c's frame of reference
+					cc.x_relative_grandparent = c.x_relative + cc.x_relative
+					cc.y_relative_grandparent = c.y_relative + cc.y_relative
+				})
+				c_io_ops.sort((a,b) => a.y_relative_grandparent - b.y_relative_grandparent) 
+
+			}
+
+			// Only checking against fixed children, ie children before us in this forEach loop
+			let already_fixed_children = op.children.slice(0, ix)
+
+			let io_ops_for_checking = already_fixed_children.map(o => {
+				if (o.collapsed) { // if o is collapsed, nothing to update. Return the node itself for checking
+					o.x_relative_grandparent = o.x_relative
+					o.y_relative_grandparent = o.y_relative
+					return [o]
+				} else { // other op is expanded, so check its io nodes
+					let io_ops = o.children.filter(cc => cc.is_output || cc.is_input)
+					io_ops.forEach(cc => {
+						cc.x_relative_grandparent = o.x_relative+cc.x_relative
+						cc.y_relative_grandparent = o.y_relative+cc.y_relative
+					})
+					return io_ops
+				}
+			}).flat()
+			io_ops_for_checking.sort((a,b) => a.y_relative_grandparent - b.y_relative_grandparent) 
+			
+			function block_occ_if_necessary(from_node, to_node) {
+				if (from_node.y_relative_grandparent == to_node.y_relative_grandparent) {
+
+					let s = from_node.x_relative_grandparent
+					let e = to_node.x_relative_grandparent
+					let row_height = from_node.y_relative_grandparent // output height == input height
+					// if (e-s > 1) console.log("horizontal line created at height ", row_height, "from ", s, " to ", e, from_node.node_id, to_node.node_id)
+					let explanation = "line from "+nice_name(from_node)+ " to "+nice_name(to_node) + " at "+row_height
+					for (let i=s; i<=e; i++) {
+						if (row_height > occupancy[i]) {
+							occupancy[i] = Math.max(occupancy[i], row_height)
+							occupancy_ids[i] = explanation
+						}	 
+					}
+				}
+			}
+
+			//////////////
+			// expanded child inputs, back to already-fixed outputs
+			c_io_ops.forEach(input_op => {
+				let upstream_output_nodes = get_upstream_nodes(input_op, io_ops_for_checking)
+				upstream_output_nodes.forEach(output_op => {
+					block_occ_if_necessary(output_op, input_op)
+				})
+			})
+
+			//////////////
+			// expanded child outputs, to already-fixed inputs
+			c_io_ops.forEach(output_op => {
+				let downstream_input_nodes = get_downstream_nodes(output_op, io_ops_for_checking)
+				downstream_input_nodes.forEach(input_op => {
+					block_occ_if_necessary(output_op, input_op)
+				})
+			})
+
+			////////////////////////////////////////////
+			// shift chunk of overlapping + above ops upwards as a group
+
+			let shift_candidate_ops = op.children.slice(ix+1, op.children.length) 
+			// only considering children we haven't yet fixed in place. Once fixed, child does not 
+			// move anymore, though they may be shifted upwards multiple times
+
+			// All directly overlapping ops
+			// Use these to find the maximum overlap w existing occupancy. We'll shift an entire chunk up using
+			// this overlap value
+			let after_nodes = shift_candidate_ops.filter(o => (o.x_relative>c.x_relative+c.w) && (o.collapsed))
+
+			let overlapping_ops = []
+			let nonoverlapping_ops = []
+			let overlap = 0
+			let occupying_thing = ''
+			let overlapping_op = ''
+			shift_candidate_ops.forEach(o => {
+
+				// if edge crosses child box but has no nodes in it, will miss it unless we explicitly check for that
+				let block_until
+				// if (false) { 
+				if ((o.x_relative<c.x_relative) && (o.collapsed)) {
+					let dns = get_downstream_nodes(o, after_nodes)
+					// if (dns.length>0){
+					if (dns.length==1){
+						// block_until = Math.max(...dns.map(dn => dn.x_relative)) // should only be one
+						block_until = dns[0].x_relative // should only be one
+					} else {
+						block_until	= o.x_relative+o.w
+					}
+				} else {
+					block_until	= o.x_relative+o.w
+				}
+
+				// let occ = Math.max(...occupancy.slice(o.x_relative, block_until+1))
+				let [occ, ix] = max_and_ix(occupancy, o.x_relative, block_until)
+				let op_overlap = occ - o.y_relative +1
+				if (op_overlap > 0) {
+					overlapping_ops.push(o)
+					if (op_overlap > overlap) {
+						overlap = op_overlap
+						occupying_thing = occupancy_ids[ix]
+						overlapping_op = nice_name(o)
+					}
+					overlap = Math.max(op_overlap, overlap)
+				} else {
+					nonoverlapping_ops.push(o)
+				}
+			})
+
+
+			// all above ops
+			let xs = overlapping_ops.map(o => o.x_relative)
+			let min_x = Math.min(...xs); let max_x = Math.max(...xs) // jesus effing christ need the ... or nan BUG REPORT was causing everything to be 'above'
+
+			// These ops are not overlapping directly w current occupancy, but they're above ops that are
+			let above_ops = nonoverlapping_ops.filter(o => {
+				let is_above = (o.x_relative+o.w >= min_x) && (o.x_relative <= max_x)
+				return is_above
+			})
+
+			// Shifting entire group of overlapping ops + above the overlapping ops, thus maintaining layout
+			let ops_to_shift = overlapping_ops.concat(above_ops)
+
+			// also shifting all ops that share row line w shifting ops. Don't want to break lines.
+			let shifting_ops_rows = ops_to_shift.map(o => o.row_counter)
+			ops_to_shift = shift_candidate_ops.filter(o => shifting_ops_rows.includes(o.row_counter))
+			
+			let m = "y shift up during child "+nice_name(c)+". Existing occ from "+occupying_thing+" overlapped by "+overlapping_op
+			ops_to_shift.forEach(o => o.y_relative += overlap)
+
+			overlapping_ops.forEach(o => {
+				let _m = m + ". Was overlapping itself"
+				o.history_js.push(_m)
+			})
+			above_ops.forEach(o => {
+				let _m = m + ". Was not overlapping itself, but was above overlapping op"
+				o.history_js.push(_m)
+			})
+			let overlapping_or_above_ops_ids = overlapping_ops.map(o=>o.node_id).concat(above_ops.map(o=>o.node_id))
+			ops_to_shift.forEach(o => {
+				if (!overlapping_or_above_ops_ids.includes(o.node_id)) {
+					let _m = m + ". Was not overlapping itself, but was part of row which was overlapping or above"
+					o.history_js.push(_m)
+				}
+			})
+
+		})
+
+
+		// Now that all children ops have their dims, and have been shifted bc of expansions, we can ascertain
+		// the dimensions of the parent op
+		op.w = Math.max(...op.children.map(c => c.x_relative+c.w))
+		op.h = Math.max(...op.children.map(c => c.y_relative+c.h))
+	}
+	update_op_h_w(nn)
+
+	// Get absolute coords from nested relative coords
+	function set_op_children_absolute_coords(op) {
+		op.children.forEach(c => {
+			c.x = op.x + c.x_relative
+			c.y = op.y + c.y_relative
+			set_op_children_absolute_coords(c)
+		})
+	}
+	nn.x = 0; nn.y = 0
+	set_op_children_absolute_coords(nn)
+
+	// debugging
+	function random_shift(op) {
+		op.y_unshifted = op.y
+		op.y += Math.random()*.2
+		op.children.forEach(c => random_shift(c))
+	}
+	random_shift(nn)
+
+	// set max depth, used for scales
+	max_depth = 0
+	function set_max_depth(op) {
+		max_depth = Math.max(max_depth, (op.depth ? op.depth : 0))
+		if (!op.collapsed){
+			op.children.forEach(c => set_max_depth(c))
+		}
+	}
+	set_max_depth(nn)
+	console.log("max depth ", max_depth)
+
+	// Mark plane specs
+	let PLANE_BUFFER = {top:.05, bottom:.15, left:.05, right:.05}
+	function mark_plane_specs(op) {
+		op.children.forEach(c => {
+			if (c.collapsed){
+				c.plane_info = {}
+				c.plane_info.min_x = c.x - PLANE_BUFFER.left
+				c.plane_info.max_x = c.x + PLANE_BUFFER.right
+				c.plane_info.min_y = c.y - PLANE_BUFFER.top
+				c.plane_info.max_y = c.y + PLANE_BUFFER.bottom
+			} else {
+				mark_plane_specs(c)
+			}
+		})
+		op.plane_info = {}
+		// x
+		let children_min_xs = op.children.map(c => c.plane_info.min_x)
+		op.plane_info.min_x = Math.min(...children_min_xs) - PLANE_BUFFER.left
+
+		let children_max_xs = op.children.map(c => c.plane_info.max_x)
+		op.plane_info.max_x = Math.max(...children_max_xs) + PLANE_BUFFER.right
+
+		// y
+		let children_min_ys = op.children.map(c => c.plane_info.min_y)
+		op.plane_info.min_y = Math.min(...children_min_ys) - PLANE_BUFFER.top
+
+		let children_max_ys = op.children.map(c => c.plane_info.max_y)
+		op.plane_info.max_y = Math.max(...children_max_ys) + PLANE_BUFFER.bottom
+
+	}
+	mark_plane_specs(nn)
+
+	console.timeEnd("compute layout")
+}
+
+function max_and_ix(arr, s, e) {
+	let v = -1e6
+	let ix = 0
+	for (let i=s; i<=e; i++) {
+		if (arr[i] > v) {
+			v = arr[i]
+			ix = i
+		}	 
+	}
+	return [v, ix]
+}
+
+function remove_sphere(op) {
+	if (op.mesh != undefined) {
+		if ("text_dom_element" in op.mesh) {
+			let label = op.mesh.text_dom_element 
+			label.element.parentNode.removeChild(label.element);
+		}
+	}
+	scene.remove(op.mesh)
+	op.mesh = undefined
+}
+
+function remove_plane(op) {
+	scene.remove(op.expanded_plane_label)
+	scene.remove(op.expanded_plane_mesh)
+	op.expanded_plane_mesh = undefined
+	op.expanded_plane_label = undefined
+}
+
+function remove_all_meshes(op, target_position) {
+	if (op.mesh != undefined) { // has node
+		new TWEEN.Tween(op.mesh.position)
+				.to(target_position, TWEEN_MS) 
+				.easing(TWEEN_EASE)
+				.onComplete(() => {
+					remove_sphere(op)
+				})
+				.start();
+	} else if (op.expanded_plane_mesh != undefined) { // plane
+		remove_plane(op)
+	}	
+	op.children.forEach(c => {remove_all_meshes(c, target_position)})
+}
+
+function mark_originating_position(op, position) {
+	op.originating_position = position
+	op.children.forEach(c => {
+		mark_originating_position(c, position)
+	})
+}
+
+function draw_nn() {
+
+	let nn = window.nn
+
+	let nodes = []
+	let draw_order = 0
+
+	function draw_op(op) {
+		if (op.collapsed) { // Nodes
+			if (op.mesh == undefined) { // if newly appearing node, create the mesh at the position
+				
+				let sphere = get_sphere_group(op)
+
+				if (op.originating_position == undefined) { // first init, directly draw at position 
+					sphere.position.x = op.x
+					sphere.position.z = op.y
+				} else { // from expanding op
+					sphere.position.x = op.originating_position.x // init at expanding op position, then transition to new position
+					sphere.position.y = op.originating_position.y
+					sphere.position.z = op.originating_position.z
+
+					new TWEEN.Tween(sphere.position)
+						.to({x:op.x, y:0, z:op.y}, TWEEN_MS) 
+						.easing(TWEEN_EASE)
+						.start();
+				}
+				scene.add(sphere);
+				op.mesh = sphere
+			} else { // sphere exists, transition to new position
+				new TWEEN.Tween(op.mesh.position)
+						.to({x:op.x, y:0, z:op.y}, TWEEN_MS) 
+						.easing(TWEEN_EASE)
+						.start();
+			}
+
+			op.draw_order_global = draw_order; draw_order += 1
+			nodes.push(op)
+		} else { // Planes
+			////////////////////////////////////
+			// Draw or shift plane
+			if (op.expanded_plane_mesh == undefined) { // new planes, make for first time
+				const geometry = new THREE.PlaneGeometry(1, 1, 1, 1); // Width, height, and optional segment counts
+				let color = get_plane_color(op, max_depth)
+				const material = new THREE.MeshBasicMaterial({color: color, side: THREE.DoubleSide})
+				const plane = new THREE.Mesh(geometry, material);
+				plane.rotation.x = Math.PI/2
+				plane.layers.set(CLICKABLE_LAYER)
+
+				let [h,w,target_pos] = get_plane_specs(op)
+				if (op.originating_position == undefined) { // first init, draw directly
+
+					plane.scale.x = w; plane.scale.y = h; plane.scale.z = 1
+					plane.position.x = target_pos.x; plane.position.z = target_pos.z; plane.position.y = target_pos.y
+				} else { 
+					// from expanding op. Init at expanding op position, then transition to new position
+					plane.position.x = op.originating_position.x
+					plane.position.y = op.originating_position.y
+					plane.position.z = op.originating_position.z
+
+					plane.scale.x = 0; plane.scale.y = 0; plane.scale.z = 1
+
+					new TWEEN.Tween(plane.position)
+						.to(target_pos, TWEEN_MS) 
+						.easing(TWEEN_EASE)
+						.start();
+
+					new TWEEN.Tween(plane.scale)
+						.to({x:w, y:h, z:1}, TWEEN_MS) 
+						.easing(TWEEN_EASE)
+						.start();
+				}
+				
+				plane.expanded_op = op
+				scene.add(plane);
+
+				let group_label = get_group_label(op)
+				group_label.position.set(target_pos.x + w/2, target_pos.y, target_pos.z + h/2);
+				group_label.center.set(1, -1);
+				scene.add(group_label)
+
+				op.expanded_plane_mesh = plane
+				op.expanded_plane_label = group_label
+			} else { // transition existing planes
+				let plane = op.expanded_plane_mesh
+				let [h,w,target_pos] = get_plane_specs(op)
+				// scale
+				new TWEEN.Tween(plane.scale)
+					.to({x:w,y:h,z:1}, TWEEN_MS)
+					.easing(TWEEN_EASE)
+					.start();
+				// location
+				new TWEEN.Tween(plane.position)
+					.to(target_pos, TWEEN_MS)
+					.easing(TWEEN_EASE)
+					.start();
+
+				plane.material.color = get_plane_color(op, max_depth) // depth changes scale
+
+				// label location
+				let group_label = op.expanded_plane_label
+				let pos = target_pos
+				// group_label.position.set(pos.x + w/2, pos.y, pos.z + h/2)
+				new TWEEN.Tween(group_label.position)
+					.to({x:pos.x + w/2, y:pos.y, z:pos.z + h/2}, TWEEN_MS)
+					.easing(TWEEN_EASE)
+					.start();
+
+				
+			}
+
+			// If expanding op, there will be a sphere to remove
+			if (op.mesh != undefined) { remove_sphere(op) }
+
+
+			////////////////////////////////////
+			// Op is expanded, draw children
+			op.children.sort((a,b) => {return a.draw_order - b.draw_order})
+			op.children.forEach(c => {
+				draw_op(c)
+			})
+		}
+	}
+	nn.children.sort((a,b) => {return a.draw_order - b.draw_order})
+	draw_op(nn)
+	window.nodes = nodes // storing for convience. These are the real ops, not copies, same as in the nested structure
+
+	// edges
+	let edges = []
+	let already_added = [] // debugging
+
+	let c = 0; let edge_already_added = false
+	function add_edge_btwn_op_and_downstream_ops(op, ix){
+		let downstream_nodes = get_downstream_nodes(op, nodes)
+		// console.log(op.name, downstream_nodes.map(dn => dn.name))
+		downstream_nodes.forEach(dn => {
+
+			let e = op.node_id + dn.node_id
+			if (already_added.includes(e)) { 
+				edge_already_added = true
+				c+=1
+				if (c>1e6) {
+					console.log("wtf edge added too many times")
+					return
+				}
+			} else {
+				edges.push([op, dn, ix])
+				already_added.push(e)
+				add_edge_btwn_op_and_downstream_ops(dn, ix)
+			}
+		})
+	}
+	function get_start_nodes(_nodes) {
+		let all_outbound_edges = _nodes.map(n=>n.outbound_edges).flat()
+		let start_nodes = _nodes.filter(n=>n.inbound_edges.filter(e=>!all_outbound_edges.includes(e).length>0) // inbound edges originate from node not in included nodes
+											|| n.inbound_edges.length==0)	// no inbound edges at all
+		return start_nodes
+	}
+	nodes.sort((a,b)=> a.x - b.x)
+	let start_nodes = get_start_nodes(nodes)
+	start_nodes.sort((a,b) => a.input_priority - b.input_priority)
+
+	start_nodes.forEach((n,i) => {
+		add_edge_btwn_op_and_downstream_ops(n,i)
+	})
+	// add_edge_btwn_op_and_downstream_ops(start_nodes[0]) // NOTE WARNING debugging SD, not drawing conditioning info
+
+	all_curves.forEach(c => {
+		scene.remove(c)
+	}) // just removing and remaking for now. Hack
+	all_curves = []
+	edges.forEach(e => {
+		let n0 = e[0]; let n1 = e[1]; let origin_ix = e[2]
+		let color = n0.y_unshifted==n1.y_unshifted ? new THREE.Color(.1, .1, .1) : new THREE.Color(Math.random() * 0xff0000)
+		let fn = n0.y_unshifted==n1.y_unshifted ? get_connecting_curve_flat : get_connecting_curve
+		let curve = fn({x:n0.x, y:0, z:n0.y}, {x:n1.x, y:0, z:n1.y}, color)
+		scene.add(curve)
+		all_curves.push(curve)
+	})
+}
+
+let all_curves = []
+
+function get_highlight(c) {
+	let p = 1.4
+	return new THREE.Color(Math.min(c.r*p, 1.), Math.min(c.g*p, 1.), Math.min(c.b*p, 1.));
+}
+
+function onMouseMove(event) {
+	raycaster.layers.set(CLICKABLE_LAYER)
+	pointer.set( ( event.clientX / window.innerWidth ) * 2 - 1, - ( event.clientY / window.innerHeight ) * 2 + 1 );
+	raycaster.setFromCamera( pointer, camera );
+	const intersects = raycaster.intersectObjects( scene.children, true);
+	let is_shift = event.shiftKey
+
+	if ( intersects.length > 0 ) {
+
+		if ("smaller_sphere" in intersects[ 0 ].object) {
+
+			if ( INTERSECTED != intersects[ 0 ].object.smaller_sphere ) {
+
+				if ( INTERSECTED ) { // going from one selected to another
+					INTERSECTED.material.color = INTERSECTED.prev_color
+				}
+
+				INTERSECTED = intersects[ 0 ].object.smaller_sphere;
+				let c = INTERSECTED.material.color
+				INTERSECTED.prev_color = c
+
+				INTERSECTED.material.color = get_highlight(c)
+
+				console.log("mouseover node", intersects[ 0 ].object.smaller_sphere.actual_node)
+
+			}
+		} else if ("expanded_op" in intersects[ 0 ].object) {
+			if ( INTERSECTED != intersects[ 0 ].object ) {
+
+				if ( INTERSECTED ) { // going from one selected to another
+					INTERSECTED.material.color = INTERSECTED.prev_color
+				}
+
+				INTERSECTED = intersects[ 0 ].object;
+				let c = INTERSECTED.material.color
+				INTERSECTED.prev_color = c
+				INTERSECTED.material.color = get_highlight(c)
+
+
+				if (is_shift) console.log("mouseover plane", intersects[ 0 ].object.expanded_op)
+
+			}
+		} else {
+			console.log("mouseover unknown something", intersects[0])
+		}
+	} else { // no selected at all
+
+		if ( INTERSECTED ) INTERSECTED.material.color = INTERSECTED.prev_color;
+		INTERSECTED = null;
+
+	}
+
+}
+
+function mark_as_collapsed(op, is_collapsed, propogate_to_children){
+	op.collapsed = is_collapsed
+	if (propogate_to_children) {
+		op.children.forEach(c => mark_as_collapsed(c, is_collapsed, propogate_to_children))
+	}
+}
+
+function onPointerDown( event ) {
+	console.log("Doubleclick")
+	raycaster.layers.set(CLICKABLE_LAYER)
+	pointer.set( ( event.clientX / window.innerWidth ) * 2 - 1, - ( event.clientY / window.innerHeight ) * 2 + 1 );
+	raycaster.setFromCamera( pointer, camera );
+	const intersects = raycaster.intersectObjects( scene.children, true);
+
+	let is_shift = event.shiftKey
+	if (is_shift) console.log("shift is down")
+
+	if ( intersects.length > 0 ) {
+		if ("smaller_sphere" in intersects[ 0 ].object) { // expanding an op
+			let n = intersects[ 0 ].object.smaller_sphere.actual_node
+			console.log("clicked ", n)
+			let un = get_upstream_nodes(n, window.nodes)
+			let dn = get_downstream_nodes(n, window.nodes)
+			console.log("upstream nodes", un.map(o=>nice_name(o)), "downstream_nodes", dn.map(o=>nice_name(o)))
+
+			mark_as_collapsed(n, false, false)
+			mark_originating_position(n, {x:n.x, y:0, z:n.y}) 
+			recompute_layout()
+			draw_nn()
+			
+			mark_originating_position(n, undefined) //  
+
+		} else if ("expanded_op" in intersects[0].object) { // collapsing an op
+			let intersect = intersects[0].object
+			console.log("attempting to collapse plane for ", intersect.expanded_op.name, intersect.expanded_op)
+
+			let op = intersect.expanded_op
+			mark_as_collapsed(op, true, false) // mark the datastructure
+			recompute_layout() // recompute datastructure
+			remove_all_meshes(op, {x:op.x, y:0, z:op.y}) // remove the physical meshes
+			draw_nn() 
+		}
+	}
+
+	// // line to vizualize raycaster
+	// const material = new THREE.LineBasicMaterial({ color: 0xff0000 });
+	// const points = [];
+	// points.push(raycaster.ray.origin);
+	// points.push(raycaster.ray.origin.clone().add(raycaster.ray.direction.multiplyScalar(100)));
+	// const geometry = new THREE.BufferGeometry().setFromPoints(points);
+	// const line = new THREE.Line(geometry, material);
+	// scene.add(line);
+
+	renderer.render(scene, camera);
+}
+
+function onWindowResize() {
+	camera.aspect = window.innerWidth / window.innerHeight;
+	camera.updateProjectionMatrix();
+	renderer.setSize( window.innerWidth, window.innerHeight );
+	labelRenderer.setSize( window.innerWidth, window.innerHeight );
+}
+
+function onPointerMove( event ) {
+	pointer.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+	pointer.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+}
+
+let maxLabelDistance = 10
+
+function set_node_visible(node_group, visible) {
+	node_group.children.forEach(c => {
+		if (c instanceof CSS2DObject) {
+			c.visible = visible
+		}
+	})
+}
+
+function animate(time) {
+	requestAnimationFrame( animate );
+
+	TWEEN.update(time);
+	controls.update();
+	render();
+	stats.update();
+
+	if ("nodes" in window) {
+		window.nodes.forEach(n => {
+			let g = n.mesh
+
+			// for 3d
+			// // Calculate the distance from the camera to the label
+			// const distance = camera.position.distanceTo(g.position);
+
+			// 2d
+			if (camera.zoom > 65) {
+				set_node_visible(g, true)
+			} else {
+				set_node_visible(g, false)
+			}
+		})
+	}
+
+}
+
+function render() {
+	renderer.render( scene, camera );
+	labelRenderer.render( scene, camera );
+}
+
+</script>
+
+</body>
+</html>

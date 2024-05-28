@@ -1,0 +1,26 @@
+
+
+ensure we're not using dist from end considering all ends, should only be from our primary end. Dist from end global should not be based on any rando output, should be the primary output. gcvit shows this, now that we have stranded inputs. Also can see in KL vae
+
+
+in DLA we're not correctly adding an input branch node. The same input is coming is getting two separate input nodes
+
+an onHover tooltip would be nicer for debugging than the hover over and show in console.
+
+gigagan not working bc of the iterable that is sent into the module as a kwarg. Need to debug further to get it working. We need to think about how to deal w nonstandard args/kwargs like that.
+
+stylegan2 looks decent after we removed style_trunc, which was causing it to run many times for same network. We need to think through how to deal w that situation, as it may happen. How do we deal w the same nn running multiple times in one Record session? is this happening in our SD full? what about yolo?
+
+writing this logic in c++ prob makes sense? who wants to do that.
+
+maskrcnn, edge_id not being passed along
+
+io for modules is challenging. We don't want them moved to the right or left. But sometimes the module IS the input or output to its parent. This is true when it originates a new RecorderTensor or contains a global output tensor and doesn't return anything. Our conception of inputs, outputs, what is a tensor and when, what should be shifted to the right and left, is not clean. And how it interacts w Root container. We've patched it for now by just only shifting our manual explicit io nodes in JS, ie not shifting modules when they appear as io
+
+what is up w selfoutput in both swinv2 and dino? something about Transformers library?
+
+gemma taking forever in mark_dist_from_end. 6 plus hours, stopped it manually.
+
+yolo sometimes two nns? sometimes one?
+
+
